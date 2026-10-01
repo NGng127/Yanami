@@ -9,21 +9,68 @@ import 'dart:async';
 
 void main() => runApp(const MyApp());
 
-class MyApp extends StatelessWidget {
+class ThemeController extends ChangeNotifier {
+  bool isDarkMode = false;
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    isDarkMode = prefs.getBool('dark_mode') ?? false;
+    notifyListeners();
+  }
+
+  Future<void> setDarkMode(bool value) async {
+    isDarkMode = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('dark_mode', value);
+  }
+}
+
+final ThemeController themeController = ThemeController();
+
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  @override
+  void initState() {
+    super.initState();
+    themeController.load();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Yanami',
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      supportedLocales: const [Locale('zh', 'CN'), Locale('en', 'US')],
-      locale: const Locale('zh', 'CN'),
-      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF366CB6)), useMaterial3: true),
-      home: const MainScreen(),
+    return AnimatedBuilder(
+      animation: themeController,
+      builder: (context, _) {
+        return MaterialApp(
+          title: 'Yanami',
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: const [Locale('zh', 'CN'), Locale('en', 'US')],
+          locale: const Locale('zh', 'CN'),
+          themeMode: themeController.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF366CB6)),
+            useMaterial3: true,
+          ),
+          darkTheme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF366CB6),
+              brightness: Brightness.dark,
+            ),
+            useMaterial3: true,
+          ),
+          home: const MainScreen(),
+        );
+      },
     );
   }
 }
@@ -54,7 +101,6 @@ class _MainScreenState extends State<MainScreen> {
         title: const Text('Yanami'),
         backgroundColor: Colors.transparent,
         elevation: 0,
-        foregroundColor: Colors.black,
         actions: _currentIndex == 1
             ? [
                 PopupMenuButton<String>(
@@ -102,33 +148,33 @@ Future<List<Map<String, dynamic>>> searchBangumi(String keyword, {int type = 2})
         'Accept': 'application/json',
         'User-Agent': 'NGng127/YanamiApp/1.0 (https://github.com/NGng127)',
       },
-      body: jsonEncode({
-        'keyword': keyword,
-        'filter': {'type': [type]},
-      }),
+      body: jsonEncode({'keyword': keyword, 'filter': {'type': [type]}}),
     ).timeout(const Duration(seconds: 15));
-    if (response.statusCode == 200) {
-      final data = jsonDecode(utf8.decode(response.bodyBytes));
-      final List<dynamic> list = data['data'] ?? [];
-      return list.map<Map<String, dynamic>>((item) {
-        String name = (item['name_cn']?.toString().isNotEmpty == true) ? item['name_cn'].toString() : (item['name'] ?? '未知');
-        String original = item['name'] ?? '';
-        String img = item['images']?['large'] ?? item['images']?['common'] ?? '';
-        if (img.isNotEmpty) {
-          img = img.replaceAll('lain.bgm.tv', 'bgmimg.anibt.net');
-          img = img.replaceAll('http://', 'https://');
-        }
-        double score = (item['rating']?['score'] ?? 0).toDouble();
-        String summary = item['summary'] ?? '';
-        String date = item['date'] ?? '';
-        int rank = item['rank'] ?? 0;
-        return {'title': name, 'original': original, 'cover': img, 'description': summary, 'date': date, 'score': score, 'rank': rank};
-      }).toList();
-    }
+    if (response.statusCode != 200) return [];
+    final data = jsonDecode(utf8.decode(response.bodyBytes));
+    final rawList = data is Map ? data['data'] : null;
+    if (rawList is! List) return [];
+    return rawList.whereType<Map>().map<Map<String, dynamic>>((item) {
+      final images = item['images'] is Map ? Map<String, dynamic>.from(item['images']) : <String, dynamic>{};
+      final rating = item['rating'] is Map ? Map<String, dynamic>.from(item['rating']) : <String, dynamic>{};
+      final cn = item['name_cn']?.toString().trim() ?? '';
+      final name = cn.isNotEmpty ? cn : (item['name']?.toString() ?? '未知');
+      var img = (images['large'] ?? images['common'] ?? '').toString();
+      if (img.isNotEmpty) img = img.replaceAll('lain.bgm.tv', 'bgmimg.anibt.net').replaceAll('http://', 'https://');
+      return {
+        'title': name,
+        'original': item['name']?.toString() ?? '',
+        'cover': img,
+        'description': item['summary']?.toString() ?? '',
+        'date': item['date']?.toString() ?? '',
+        'score': double.tryParse((rating['score'] ?? 0).toString()) ?? 0,
+        'rank': int.tryParse((item['rank'] ?? 0).toString()) ?? 0,
+      };
+    }).toList();
   } catch (e) {
     debugPrint('Bangumi 搜索失败: $e');
+    return [];
   }
-  return [];
 }
 
 // ==================== 页面一：首页 ====================
@@ -168,11 +214,15 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _fetchRecommendations() async {
+    if (!mounted) return;
     setState(() { _isLoading = true; _errorMessage = null; _animeList = []; });
     try {
       final response = await http.get(Uri.parse(_getDataFileUrl()), headers: {'Accept': 'application/json'}).timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
+        final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+        if (decoded is! List) throw const FormatException('季度数据格式错误');
+        final List<dynamic> data = decoded;
+        if (!mounted) return;
         setState(() {
           _animeList = data.map<Map<String, dynamic>>((item) => {
             'title': item['name'] ?? '未知',
@@ -185,11 +235,14 @@ class _HomePageState extends State<HomePage> {
           _isLoading = false;
         });
       } else {
+        if (!mounted) return;
         setState(() { _isLoading = false; _errorMessage = '这个季度暂时没有数据 (${response.statusCode})'; });
       }
     } on TimeoutException {
+      if (!mounted) return;
       setState(() { _isLoading = false; _errorMessage = '网络超时，请重试'; });
     } catch (e) {
+      if (!mounted) return;
       setState(() { _isLoading = false; _errorMessage = '网络错误：$e'; });
     }
   }
@@ -276,40 +329,80 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  void _showSearchDialog() {
+  Future<void> _showSearchDialog() async {
     final TextEditingController searchCtrl = TextEditingController();
     List<Map<String, dynamic>> results = [];
     bool isSearching = false;
     String? error;
+    Map<String, dynamic>? selectedItem;
 
-    showDialog(
+    await showDialog<void>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setStateSearch) {
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setStateSearch) {
           Future<void> doSearch() async {
-            if (searchCtrl.text.trim().isEmpty) return;
-            setStateSearch(() { isSearching = true; error = null; results = []; });
-            final r = await searchBangumi(searchCtrl.text.trim(), type: 2);
-            setStateSearch(() { results = r; isSearching = false; });
-            if (r.isEmpty) setStateSearch(() { error = '没找到相关番剧，试试别的关键词'; });
+            final keyword = searchCtrl.text.trim();
+            if (keyword.isEmpty || isSearching) return;
+            setStateSearch(() {
+              isSearching = true;
+              error = null;
+              results = [];
+              selectedItem = null;
+            });
+            final r = await searchBangumi(keyword, type: 2);
+            if (!dialogContext.mounted) return;
+            setStateSearch(() {
+              results = r;
+              isSearching = false;
+              error = r.isEmpty ? '没找到相关番剧，试试别的关键词' : null;
+            });
           }
 
-          return AlertDialog(
-            title: const Text('搜索番剧评分'),
-            content: SizedBox(
-              width: double.maxFinite,
-              height: 500,
-              child: Column(children: [
+          Widget buildSearchResults() {
+            return Column(
+              children: [
                 Row(children: [
-                  Expanded(child: TextField(controller: searchCtrl, autofocus: true, decoration: const InputDecoration(hintText: '输入番剧名字', border: OutlineInputBorder()), onSubmitted: (_) => doSearch())),
+                  Expanded(
+                    child: TextField(
+                      controller: searchCtrl,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        hintText: '输入番剧名字',
+                        border: OutlineInputBorder(),
+                      ),
+                      onSubmitted: (_) => doSearch(),
+                    ),
+                  ),
                   const SizedBox(width: 8),
-                  ElevatedButton(onPressed: isSearching ? null : doSearch, child: isSearching ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('搜索')),
+                  ElevatedButton(
+                    onPressed: isSearching ? null : doSearch,
+                    child: isSearching
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text('搜索'),
+                  ),
                 ]),
                 const SizedBox(height: 12),
-                if (error != null) Text(error!, style: const TextStyle(color: Colors.red, fontSize: 13)),
+                if (error != null)
+                  Text(
+                    error!,
+                    style: const TextStyle(color: Colors.red, fontSize: 13),
+                  ),
                 Expanded(
                   child: results.isEmpty
-                      ? Center(child: Text(isSearching ? '搜索中...' : '输入名字后点搜索', style: const TextStyle(color: Colors.grey), textAlign: TextAlign.center))
+                      ? Center(
+                          child: Text(
+                            isSearching ? '搜索中...' : '输入名字后点搜索',
+                            style: const TextStyle(color: Colors.grey),
+                            textAlign: TextAlign.center,
+                          ),
+                        )
                       : ListView.builder(
                           itemCount: results.length,
                           itemBuilder: (context, index) {
@@ -318,69 +411,193 @@ class _HomePageState extends State<HomePage> {
                               margin: const EdgeInsets.only(bottom: 8),
                               child: ListTile(
                                 leading: item['cover'].toString().isNotEmpty
-                                    ? ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.network(item['cover'], width: 45, height: 60, fit: BoxFit.cover, headers: {'Referer': 'https://bgm.tv/', 'User-Agent': 'Mozilla/5.0'}, errorBuilder: (c, e, s) => const Icon(Icons.image, size: 30, color: Colors.grey)))
+                                    ? ClipRRect(
+                                        borderRadius: BorderRadius.circular(4),
+                                        child: Image.network(
+                                          item['cover'],
+                                          width: 45,
+                                          height: 60,
+                                          fit: BoxFit.cover,
+                                          cacheWidth: 135,
+                                          cacheHeight: 180,
+                                          headers: const {
+                                            'Referer': 'https://bgm.tv/',
+                                            'User-Agent': 'Mozilla/5.0',
+                                          },
+                                          errorBuilder: (c, e, s) =>
+                                              const Icon(Icons.image, size: 30, color: Colors.grey),
+                                        ),
+                                      )
                                     : const Icon(Icons.image, size: 30, color: Colors.grey),
-                                title: Text(item['title'], maxLines: 1, overflow: TextOverflow.ellipsis),
-                                subtitle: Text('${item['date']}   ★ ${item['score']}', style: const TextStyle(fontSize: 12)),
-                                onTap: () { Navigator.pop(context); _showSearchDetail(item); },
+                                title: Text(
+                                  item['title']?.toString() ?? '未知',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Text(
+                                  '${item['date'] ?? ''}   ★ ${item['score'] ?? 0}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                                onTap: () {
+                                  // 不再关闭搜索 Dialog 后立即打开 BottomSheet。
+                                  // 详情直接在当前 Dialog 内切换，避免两个 Route/Overlay 连续切换导致卡死。
+                                  setStateSearch(() => selectedItem = item);
+                                },
                               ),
                             );
                           },
                         ),
                 ),
-              ]),
+              ],
+            );
+          }
+
+          Widget buildDetail(Map<String, dynamic> anime) {
+            final coverUrl = anime['cover']?.toString() ?? '';
+            final cs = Theme.of(context).colorScheme;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  IconButton(
+                    tooltip: '返回搜索结果',
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: () => setStateSearch(() => selectedItem = null),
+                  ),
+                  const Expanded(
+                    child: Text(
+                      '番剧详情',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ]),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 500,
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: coverUrl.isNotEmpty
+                                  ? Image.network(
+                                      coverUrl,
+                                      width: 120,
+                                      height: 170,
+                                      fit: BoxFit.cover,
+                                      cacheWidth: 360,
+                                      cacheHeight: 510,
+                                      headers: const {
+                                        'Referer': 'https://bgm.tv/',
+                                        'User-Agent': 'Mozilla/5.0',
+                                      },
+                                      loadingBuilder: (context, child, progress) {
+                                        if (progress == null) return child;
+                                        return Container(
+                                          width: 120,
+                                          height: 170,
+                                          alignment: Alignment.center,
+                                          color: cs.surfaceContainerHighest,
+                                          child: const SizedBox(
+                                            width: 24,
+                                            height: 24,
+                                            child: CircularProgressIndicator(strokeWidth: 2),
+                                          ),
+                                        );
+                                      },
+                                      errorBuilder: (c, e, s) => Container(
+                                        width: 120,
+                                        height: 170,
+                                        color: cs.surfaceContainerHighest,
+                                        child: const Icon(Icons.image, size: 50),
+                                      ),
+                                    )
+                                  : Container(
+                                      width: 120,
+                                      height: 170,
+                                      color: cs.surfaceContainerHighest,
+                                      child: const Icon(Icons.image, size: 50),
+                                    ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    anime['title']?.toString() ?? '未知',
+                                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  if ((anime['original'] ?? '').toString().isNotEmpty)
+                                    Text(
+                                      anime['original'].toString(),
+                                      style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+                                    ),
+                                  const SizedBox(height: 12),
+                                  Wrap(
+                                    spacing: 6,
+                                    runSpacing: 4,
+                                    children: [
+                                      if ((anime['date'] ?? '').toString().isNotEmpty)
+                                        _buildTag(anime['date'], const Color(0xFF366CB6)),
+                                      if ((anime['score'] ?? 0) > 0)
+                                        _buildTag('★ ${anime['score']}', Colors.amber[800]!),
+                                      if ((anime['rank'] ?? 0) > 0)
+                                        _buildTag('排名 #${anime['rank']}', Colors.purple[700]!),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 24),
+                        Text(
+                          '简介',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: cs.onSurface),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          anime['description']?.toString() ?? '暂无简介',
+                          style: TextStyle(fontSize: 14, height: 1.6, color: cs.onSurface),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }
+
+          return AlertDialog(
+            title: selectedItem == null ? const Text('搜索番剧评分') : null,
+            content: SizedBox(
+              width: double.maxFinite,
+              height: 560,
+              child: selectedItem == null
+                  ? buildSearchResults()
+                  : buildDetail(selectedItem!),
             ),
-            actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('关闭'))],
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: Text(selectedItem == null ? '关闭' : '完成'),
+              ),
+            ],
           );
         },
       ),
     );
-  }
-
-  void _showSearchDetail(Map<String, dynamic> anime) {
-    String coverUrl = anime['cover']?.toString() ?? '';
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.7, minChildSize: 0.4, maxChildSize: 0.95, expand: false,
-        builder: (context, scrollController) => SingleChildScrollView(
-          controller: scrollController,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 30),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(2)))),
-              const SizedBox(height: 20),
-              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: coverUrl.isNotEmpty
-                      ? Image.network(coverUrl, width: 120, height: 170, fit: BoxFit.cover, headers: {'Referer': 'https://bgm.tv/', 'User-Agent': 'Mozilla/5.0'}, errorBuilder: (c, e, s) => Container(width: 120, height: 170, color: Colors.grey[200], child: const Icon(Icons.image, size: 50, color: Colors.grey)))
-                      : Container(width: 120, height: 170, color: Colors.grey[200], child: const Icon(Icons.image, size: 50, color: Colors.grey)),
-                ),
-                const SizedBox(width: 16),
-                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(anime['title'] ?? '未知', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 6),
-                  if ((anime['original'] ?? '').toString().isNotEmpty) Text(anime['original'], style: TextStyle(fontSize: 13, color: Colors.grey[600])),
-                  const SizedBox(height: 12),
-                  Wrap(spacing: 6, runSpacing: 4, children: [
-                    if ((anime['date'] ?? '').toString().isNotEmpty) _buildTag(anime['date'], const Color(0xFF366CB6)),
-                    if ((anime['score'] ?? 0) > 0) _buildTag('★ ${anime['score']}', Colors.amber[800]!),
-                    if ((anime['rank'] ?? 0) > 0) _buildTag('排名 #${anime['rank']}', Colors.purple[700]!),
-                  ]),
-                ])),
-              ]),
-              const SizedBox(height: 24),
-              const Text('简介', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Text(anime['description'] ?? '暂无简介', style: const TextStyle(fontSize: 14, height: 1.6, color: Colors.black87)),
-            ]),
-          ),
-        ),
-      ),
-    );
+    searchCtrl.dispose();
   }
 
   String _resolveCoverUrl(String raw) {
@@ -426,7 +643,7 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 24),
               const Text('简介', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
-              Text(anime['description'] ?? '暂无简介', style: const TextStyle(fontSize: 14, height: 1.6, color: Colors.black87)),
+              Text(anime['description'] ?? '暂无简介', style: TextStyle(fontSize: 14, height: 1.6, color: Theme.of(context).colorScheme.onSurface)),
             ]),
           ),
         ),
@@ -555,7 +772,7 @@ class AnimeRecordPage extends StatefulWidget {
 
 class AnimeRecordPageState extends State<AnimeRecordPage> {
   List<Map<String, dynamic>> _animeList = [];
-  late SharedPreferences _prefs;
+  SharedPreferences? _prefs;
 
   String _searchKeyword = '';
   String _categoryFilter = '全部';
@@ -567,8 +784,28 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
   final List<IconData> _sizeIcons = [Icons.photo_size_select_small, Icons.photo_size_select_large, Icons.photo_size_select_actual];
 
   int _filterMode = 0;
-  final List<String> _filterNames = ['显示全部', '仅看未看完', '仅看已看完'];
-  final List<IconData> _filterIcons = [Icons.filter_list, Icons.radio_button_unchecked, Icons.check_circle];
+  final List<String> _filterNames = ['显示全部', '想看', '观看中', '已看完', '弃番'];
+  final List<IconData> _filterIcons = [Icons.filter_list, Icons.bookmark_border, Icons.play_circle_outline, Icons.check_circle, Icons.cancel_outlined];
+
+  static const List<String> _watchStatuses = ['想看', '观看中', '已看完', '弃番'];
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case '观看中': return Colors.blue;
+      case '已看完': return Colors.green;
+      case '弃番': return Colors.grey;
+      default: return Colors.orange;
+    }
+  }
+
+  IconData _statusIcon(String status) {
+    switch (status) {
+      case '观看中': return Icons.play_circle_outline;
+      case '已看完': return Icons.check_circle_outline;
+      case '弃番': return Icons.cancel_outlined;
+      default: return Icons.bookmark_border;
+    }
+  }
 
   @override
   void initState() {
@@ -577,39 +814,59 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
   }
 
   Future<void> _loadData() async {
-    _prefs = await SharedPreferences.getInstance();
-    String? jsonString = _prefs.getString('animeList');
-    if (jsonString != null) {
-      List<dynamic> decoded = jsonDecode(jsonString);
-      setState(() {
-        _animeList = decoded.map((e) {
-          Map<String, dynamic> map = Map<String, dynamic>.from(e);
-          map['sessions'] ??= [];
-          map['isFinished'] ??= false;
-          map['category'] ??= '番剧';
-          map['volumes'] ??= [];
-          return map;
-        }).toList();
-      });
-    } else {
-      setState(() {
-        _animeList = [
-          {
-            'title': '长按可以删除',
-            'subtitle': '0集 00:00:00',
-            'cover': '',
-            'isFinished': false,
-            'category': '番剧',
-            'volumes': [],
-            'sessions': [{'start': '2008-11-29', 'end': '2008-11-29'}],
-          },
-        ];
-      });
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    _prefs = prefs;
+    final jsonString = prefs.getString('animeList');
+    if (jsonString != null && jsonString.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(jsonString);
+        if (decoded is List) {
+          final loaded = <Map<String, dynamic>>[];
+          for (final e in decoded) {
+            if (e is Map) {
+              final map = Map<String, dynamic>.from(e);
+              map['sessions'] = map['sessions'] is List ? map['sessions'] : <dynamic>[];
+              map['isFinished'] = map['isFinished'] == true;
+              final legacyStatus = map['status']?.toString();
+              map['status'] = _watchStatuses.contains(legacyStatus) ? legacyStatus! : (map['isFinished'] == true ? '已看完' : '想看');
+              if (map['status'] == '已看完') map['isFinished'] = true;
+              if (map['status'] != '已看完') map['isFinished'] = false;
+              map['category'] = map['category']?.toString() ?? '番剧';
+              map['volumes'] = map['volumes'] is List ? [for (int i = 0; i < map['volumes'].length; i++) _normalizeVolume(map['volumes'][i], i)] : <Map<String, dynamic>>[];
+              map['title'] = map['title']?.toString() ?? '';
+              map['subtitle'] = map['subtitle']?.toString() ?? (map['category'] == '番剧' ? '0集 00:00:00' : '未开始');
+              loaded.add(map);
+            }
+          }
+          setState(() => _animeList = loaded);
+          return;
+        }
+      } catch (e) {
+        debugPrint('读取 animeList 失败: $e');
+      }
     }
+    setState(() {
+      _animeList = [
+        {
+          'title': '长按可以删除',
+          'subtitle': '0集 00:00:00',
+          'cover': '',
+          'isFinished': false,
+          'status': '想看',
+          'category': '番剧',
+          'volumes': [],
+          'sessions': [{'start': '2008-11-29', 'end': '2008-11-29'}],
+        },
+      ];
+    });
+    await _saveData();
   }
 
   Future<void> _saveData() async {
-    await _prefs.setString('animeList', jsonEncode(_animeList));
+    final prefs = _prefs ?? await SharedPreferences.getInstance();
+    _prefs = prefs;
+    await prefs.setString('animeList', jsonEncode(_animeList));
   }
 
   void sortByStartTime() {
@@ -665,6 +922,7 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
             if (searchCtrl.text.trim().isEmpty) return;
             setStateSearch(() { isSearching = true; searchError = null; results = []; });
             final r = await searchBangumi(searchCtrl.text.trim(), type: searchType);
+            if (!context.mounted) return;
             setStateSearch(() { results = r; isSearching = false; });
             if (r.isEmpty) setStateSearch(() { searchError = '没找到相关内容'; });
           }
@@ -719,7 +977,7 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
     );
   }
 
-  Future<String?> _showAnimeProgressPicker(BuildContext context, String currentProgress) async {
+  Future<String?> _showAnimeProgressPicker(BuildContext context, String currentProgress, {String title = ''}) async {
     int episode = 0, hour = 0, minute = 0, second = 0;
     final epMatch = RegExp(r'(\d+)\s*集').firstMatch(currentProgress);
     if (epMatch != null) episode = int.tryParse(epMatch.group(1)!) ?? 0;
@@ -729,41 +987,136 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
       minute = int.tryParse(timeMatch.group(2)!) ?? 0;
       second = int.tryParse(timeMatch.group(3)!) ?? 0;
     }
+
     final epCtrl = TextEditingController(text: episode > 0 ? episode.toString() : '');
     final hCtrl = TextEditingController(text: hour.toString().padLeft(2, '0'));
     final mCtrl = TextEditingController(text: minute.toString().padLeft(2, '0'));
     final sCtrl = TextEditingController(text: second.toString().padLeft(2, '0'));
-    return showDialog<String>(
+    final durationCtrl = TextEditingController();
+    bool addHistory = false;
+    DateTime historyDate = DateTime.now();
+
+    String dateText(DateTime date) =>
+        '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+
+    final future = showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('设置观看进度'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Row(children: [
-            Expanded(child: TextField(controller: epCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '集数', border: OutlineInputBorder()))),
-            const SizedBox(width: 8),
-            const Text('集', style: TextStyle(fontSize: 16)),
-          ]),
-          const SizedBox(height: 16),
-          Row(children: [
-            Expanded(child: TextField(controller: hCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '时', border: OutlineInputBorder()))),
-            const Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Text(':', style: TextStyle(fontSize: 20))),
-            Expanded(child: TextField(controller: mCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '分', border: OutlineInputBorder()))),
-            const Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Text(':', style: TextStyle(fontSize: 20))),
-            Expanded(child: TextField(controller: sCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '秒', border: OutlineInputBorder()))),
-          ]),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-          TextButton(onPressed: () {
-            final ep = epCtrl.text.trim();
-            final h = (int.tryParse(hCtrl.text.trim()) ?? 0).toString().padLeft(2, '0');
-            final m = (int.tryParse(mCtrl.text.trim()) ?? 0).toString().padLeft(2, '0');
-            final s = (int.tryParse(sCtrl.text.trim()) ?? 0).toString().padLeft(2, '0');
-            Navigator.pop(context, '${ep.isNotEmpty ? ep : "0"}集 $h:$m:$s');
-          }, child: const Text('确定')),
-        ],
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setStateDialog) => AlertDialog(
+          title: const Text('设置观看进度'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Row(children: [
+                Expanded(child: TextField(
+                  controller: epCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: '集数', border: OutlineInputBorder()),
+                )),
+                const SizedBox(width: 8),
+                const Text('集', style: TextStyle(fontSize: 16)),
+              ]),
+              const SizedBox(height: 16),
+              Row(children: [
+                Expanded(child: TextField(controller: hCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '时', border: OutlineInputBorder()))),
+                const Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Text(':', style: TextStyle(fontSize: 20))),
+                Expanded(child: TextField(controller: mCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '分', border: OutlineInputBorder()))),
+                const Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Text(':', style: TextStyle(fontSize: 20))),
+                Expanded(child: TextField(controller: sCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '秒', border: OutlineInputBorder()))),
+              ]),
+              const Divider(height: 28),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: addHistory,
+                onChanged: (value) => setStateDialog(() => addHistory = value ?? false),
+                title: const Text('同步到每日观看历史'),
+                subtitle: const Text('本次修改的观看行为会同时添加到历史记录和热力图'),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+              if (addHistory) ...[
+                const SizedBox(height: 4),
+                Row(children: [
+                  const Text('观看日期：'),
+                  TextButton.icon(
+                    onPressed: () async {
+                      final picked = await showDatePicker(
+                        context: dialogContext,
+                        initialDate: historyDate,
+                        firstDate: DateTime(2020),
+                        lastDate: DateTime.now(),
+                      );
+                      if (picked != null) setStateDialog(() => historyDate = picked);
+                    },
+                    icon: const Icon(Icons.calendar_today, size: 17),
+                    label: Text(dateText(historyDate)),
+                  ),
+                ]),
+                TextField(
+                  controller: durationCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '观看时长（分钟）',
+                    hintText: '例如 24',
+                    border: OutlineInputBorder(),
+                    suffixText: '分钟',
+                  ),
+                ),
+              ],
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('取消')),
+            TextButton(onPressed: () async {
+              final ep = epCtrl.text.trim();
+              final h = (int.tryParse(hCtrl.text.trim()) ?? 0).toString().padLeft(2, '0');
+              final m = (int.tryParse(mCtrl.text.trim()) ?? 0).toString().padLeft(2, '0');
+              final sec = (int.tryParse(sCtrl.text.trim()) ?? 0).toString().padLeft(2, '0');
+
+              if (addHistory) {
+                final duration = int.tryParse(durationCtrl.text.trim());
+                if (duration == null || duration <= 0) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请填写有效的观看时长')));
+                  return;
+                }
+
+                final prefs = _prefs ?? await SharedPreferences.getInstance();
+                _prefs = prefs;
+                List<Map<String, dynamic>> logs = [];
+                final raw = prefs.getString('dailyLogs');
+                if (raw != null && raw.trim().isNotEmpty) {
+                  try {
+                    final decoded = jsonDecode(raw);
+                    if (decoded is List) {
+                      logs = decoded.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+                    }
+                  } catch (e) {
+                    debugPrint('读取 dailyLogs 失败: $e');
+                  }
+                }
+
+                final historyTitle = title.trim().isNotEmpty ? title.trim() : '未知番剧';
+                logs.add({
+                  'date': dateText(historyDate),
+                  'title': historyTitle,
+                  'duration': duration,
+                  'episode': int.tryParse(ep) ?? 0,
+                });
+                logs.sort((a, b) => (b['date']?.toString() ?? '').compareTo(a['date']?.toString() ?? ''));
+                await prefs.setString('dailyLogs', jsonEncode(logs));
+              }
+
+              Navigator.pop(dialogContext, '${ep.isNotEmpty ? ep : "0"}集 $h:$m:$sec');
+            }, child: const Text('确定')),
+          ],
+        ),
       ),
-    );
+    ).whenComplete(() {
+      epCtrl.dispose();
+      hCtrl.dispose();
+      mCtrl.dispose();
+      sCtrl.dispose();
+      durationCtrl.dispose();
+    });
+    return future;
   }
 
   Future<String?> _showNovelProgressPicker(BuildContext context, String currentProgress) async {
@@ -776,7 +1129,7 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
 
     final volCtrl = TextEditingController(text: volume);
     final chapCtrl = TextEditingController(text: chapter);
-    return showDialog<String>(
+    final future = showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('设置阅读进度'),
@@ -805,155 +1158,76 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
           }, child: const Text('确定')),
         ],
       ),
-    );
+    ).whenComplete(() {
+      volCtrl.dispose();
+      chapCtrl.dispose();
+    });
+    return future;
   }
 
-  // 分册管理：支持自定义卷名 + 每卷独立封面
+  static const List<String> _volumeStatuses = ['未开始', '阅读中', '已读', '弃读'];
+
+  IconData _volumeStatusIcon(String status) {
+    switch (status) {
+      case '阅读中': return Icons.menu_book;
+      case '已读': return Icons.check_circle;
+      case '弃读': return Icons.remove_circle;
+      default: return Icons.radio_button_unchecked;
+    }
+  }
+
+  Color _volumeStatusColor(String status) {
+    switch (status) {
+      case '阅读中': return Colors.blue;
+      case '已读': return Colors.green;
+      case '弃读': return Colors.grey;
+      default: return Colors.grey.shade500;
+    }
+  }
+
+  Map<String, dynamic> _normalizeVolume(dynamic raw, int index) {
+    final v = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    final status = _volumeStatuses.contains(v['status']?.toString())
+        ? v['status'].toString()
+        : ((v['progress']?.toString().trim().isNotEmpty ?? false) ? '阅读中' : '未开始');
+    return {
+      'name': (v['name']?.toString().trim().isNotEmpty ?? false) ? v['name'].toString().trim() : '第${index + 1}卷',
+      'progress': v['progress']?.toString() ?? '',
+      'status': status,
+      'cover': v['cover']?.toString() ?? '',
+      'note': v['note']?.toString() ?? '',
+    };
+  }
+
+  // 分册管理改为独立页面：页面内部自己维护状态，完成后一次性把结果返回给记录编辑页。
   Future<void> _showVolumeManager({
     required List<Map<String, dynamic>> volumes,
     required StateSetter setStateDialog,
   }) async {
-    await showDialog(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setStateVol) {
-          return AlertDialog(
-            title: const Text('分册管理'),
-            content: SizedBox(
-              width: double.maxFinite,
-              height: 400,
-              child: Column(children: [
-                Expanded(
-                  child: volumes.isEmpty
-                      ? const Center(child: Text('还没有分册，点击下方添加', style: TextStyle(color: Colors.grey)))
-                      : ListView.builder(
-                          itemCount: volumes.length,
-                          itemBuilder: (context, i) {
-                            final v = volumes[i];
-                            final cover = v['cover']?.toString() ?? '';
-                            return ListTile(
-                              leading: cover.isNotEmpty
-                                  ? ClipRRect(
-                                      borderRadius: BorderRadius.circular(4),
-                                      child: cover.startsWith('http')
-                                          ? Image.network(cover, width: 36, height: 48, fit: BoxFit.cover,
-                                              headers: {'Referer': 'https://bgm.tv/', 'User-Agent': 'Mozilla/5.0'},
-                                              errorBuilder: (c, e, s) => const Icon(Icons.menu_book, size: 30, color: Colors.grey))
-                                          : Image.file(File(cover), width: 36, height: 48, fit: BoxFit.cover,
-                                              errorBuilder: (c, e, s) => const Icon(Icons.menu_book, size: 30, color: Colors.grey)),
-                                    )
-                                  : const Icon(Icons.menu_book, size: 30, color: Colors.grey),
-                              title: Text((v['name'] ?? '').toString().isEmpty ? '未命名' : v['name']),
-                              subtitle: Text('进度：${(v['progress'] ?? '').toString().isEmpty ? "未开始" : v['progress']}'),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.remove_circle, color: Colors.red),
-                                onPressed: () => setStateVol(() => volumes.removeAt(i)),
-                              ),
-                              onTap: () => _editVolume(volumes, i, setStateVol),
-                            );
-                          },
-                        ),
-                ),
-                TextButton.icon(
-                  onPressed: () {
-                    volumes.add({'name': '', 'progress': '', 'cover': ''});
-                    setStateVol(() {});
-                  },
-                  icon: const Icon(Icons.add),
-                  label: const Text('添加分册'),
-                ),
-              ]),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context), child: const Text('完成')),
-            ],
-          );
-        },
+    final result = await Navigator.of(context).push<List<Map<String, dynamic>>>(
+      PageRouteBuilder<List<Map<String, dynamic>>>(
+        pageBuilder: (_, __, ___) => VolumeManagerPage(
+          volumes: [
+            for (int i = 0; i < volumes.length; i++)
+              _normalizeVolume(volumes[i], i),
+          ],
+        ),
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        transitionsBuilder: (_, __, ___, child) => child,
       ),
     );
-    setStateDialog(() {});
-  }
 
-  // 编辑单卷：卷名随意填（支持 SS1、99.9 等），可单独选封面
-  void _editVolume(List<Map<String, dynamic>> volumes, int index, StateSetter setStateVol) {
-    final nameCtrl = TextEditingController(text: volumes[index]['name'] ?? '');
-    final progressCtrl = TextEditingController(text: volumes[index]['progress'] ?? '');
-    String coverCtrl = volumes[index]['cover']?.toString() ?? '';
-
-    showDialog(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setStateVolDialog) {
-          return AlertDialog(
-            title: const Text('编辑分册'),
-            content: SingleChildScrollView(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                TextField(
-                  controller: nameCtrl,
-                  decoration: const InputDecoration(
-                    labelText: '卷名',
-                    hintText: '如 第一卷 / SS1 / 99.9 / 外传',
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: progressCtrl,
-                  decoration: const InputDecoration(
-                    labelText: '进度',
-                    hintText: '如 第8话 / 读完 / 未开始',
-                  ),
-                ),
-                const SizedBox(height: 16),
-                if (coverCtrl.isNotEmpty)
-                  Center(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: coverCtrl.startsWith('http')
-                          ? Image.network(coverCtrl, width: 80, height: 110, fit: BoxFit.cover,
-                              headers: {'Referer': 'https://bgm.tv/', 'User-Agent': 'Mozilla/5.0'},
-                              errorBuilder: (c, e, s) => const Icon(Icons.menu_book, size: 40, color: Colors.grey))
-                          : Image.file(File(coverCtrl), width: 80, height: 110, fit: BoxFit.cover,
-                              errorBuilder: (c, e, s) => const Icon(Icons.menu_book, size: 40, color: Colors.grey)),
-                    ),
-                  ),
-                const SizedBox(height: 8),
-                Center(
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    TextButton.icon(
-                      onPressed: () async {
-                        final ImagePicker picker = ImagePicker();
-                        final XFile? image = await picker.pickImage(source: ImageSource.gallery);
-                        if (image != null) {
-                          setStateVolDialog(() => coverCtrl = image.path);
-                        }
-                      },
-                      icon: const Icon(Icons.photo_library, size: 18),
-                      label: const Text('从相册选封面'),
-                    ),
-                    if (coverCtrl.isNotEmpty)
-                      IconButton(
-                        icon: const Icon(Icons.clear, color: Colors.red),
-                        tooltip: '移除封面',
-                        onPressed: () => setStateVolDialog(() => coverCtrl = ''),
-                      ),
-                  ]),
-                ),
-              ]),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-              TextButton(onPressed: () {
-                volumes[index]['name'] = nameCtrl.text.trim();
-                volumes[index]['progress'] = progressCtrl.text.trim();
-                volumes[index]['cover'] = coverCtrl;
-                setStateVol(() {});
-                Navigator.pop(context);
-              }, child: const Text('保存')),
-            ],
-          );
-        },
-      ),
-    );
+    // 独立页面已经完全退出后，才更新外层编辑弹窗的数据。
+    if (result != null && mounted) {
+      volumes
+        ..clear()
+        ..addAll([
+          for (int i = 0; i < result.length; i++)
+            _normalizeVolume(result[i], i),
+        ]);
+      setStateDialog(() {});
+    }
   }
 
   Widget _buildDatePickerField({required BuildContext context, required String label, required TextEditingController controller, required StateSetter setStateDialog}) {
@@ -969,7 +1243,15 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
         },
         child: InputDecorator(
           decoration: InputDecoration(labelText: label, border: const OutlineInputBorder(), suffixIcon: const Icon(Icons.calendar_today, size: 18)),
-          child: Text(controller.text.isEmpty ? '请选择日期' : controller.text, style: TextStyle(color: controller.text.isEmpty ? Colors.grey : Colors.black, fontSize: 15)),
+          child: Text(
+            controller.text.isEmpty ? '请选择日期' : controller.text,
+            style: TextStyle(
+              color: controller.text.isEmpty
+                  ? Theme.of(context).colorScheme.onSurfaceVariant
+                  : Theme.of(context).colorScheme.onSurface,
+              fontSize: 15,
+            ),
+          ),
         ),
       ),
     );
@@ -984,23 +1266,27 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
           selected: current == cat,
           onSelected: (_) => onChanged(cat),
           selectedColor: const Color(0xFF366CB6),
-          labelStyle: TextStyle(color: current == cat ? Colors.white : Colors.black87),
+          labelStyle: TextStyle(
+            color: current == cat
+                ? Colors.white
+                : Theme.of(context).colorScheme.onSurface,
+          ),
         );
       }).toList(),
     );
   }
 
-  void _addAnime() {
+  Future<void> _addAnime() async {
     final TextEditingController titleController = TextEditingController();
     final TextEditingController subtitleController = TextEditingController(text: '0集 00:00:00');
     final TextEditingController coverController = TextEditingController();
     final TextEditingController descController = TextEditingController();
-    bool isFinished = false;
+    String status = '想看';
     String category = '番剧';
     List<Map<String, dynamic>> volumes = [];
     List<Map<String, TextEditingController>> sessions = [{'start': TextEditingController(), 'end': TextEditingController()}];
 
-    showDialog(
+    await showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setStateDialog) {
@@ -1036,10 +1322,24 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                   ),
                 ]),
                 const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: status,
+                  decoration: const InputDecoration(labelText: '观看状态', border: OutlineInputBorder()),
+                  items: _watchStatuses.map((s) => DropdownMenuItem(value: s, child: Row(children: [Icon(_statusIcon(s), size: 20, color: _statusColor(s)), const SizedBox(width: 8), Text(s)]))).toList(),
+                  onChanged: (val) { if (val != null) setStateDialog(() => status = val); },
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: status,
+                  decoration: const InputDecoration(labelText: '观看状态', border: OutlineInputBorder()),
+                  items: _watchStatuses.map((s) => DropdownMenuItem(value: s, child: Row(children: [Icon(_statusIcon(s), size: 20, color: _statusColor(s)), const SizedBox(width: 8), Text(s)]))).toList(),
+                  onChanged: (val) { if (val != null) setStateDialog(() => status = val); },
+                ),
+                const SizedBox(height: 12),
                 if (category == '番剧')
                   InkWell(
                     onTap: () async {
-                      final result = await _showAnimeProgressPicker(context, subtitleController.text);
+                      final result = await _showAnimeProgressPicker(context, subtitleController.text, title: titleController.text);
                       if (result != null) { subtitleController.text = result; setStateDialog(() {}); }
                     },
                     child: InputDecorator(
@@ -1069,7 +1369,6 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                   ),
                 ],
                 const SizedBox(height: 8),
-                Row(children: [const Text('标记为已看完: '), Switch(value: isFinished, onChanged: (val) => setStateDialog(() => isFinished = val))]),
                 const SizedBox(height: 8),
                 if (coverController.text.isNotEmpty)
                   Center(child: ClipRRect(borderRadius: BorderRadius.circular(6), child: Image.network(coverController.text, width: 80, height: 110, fit: BoxFit.cover, headers: {'Referer': 'https://bgm.tv/', 'User-Agent': 'Mozilla/5.0'}, errorBuilder: (c, e, s) => const Icon(Icons.image, size: 40, color: Colors.grey)))),
@@ -1093,7 +1392,7 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                       _buildDatePickerField(context: context, label: '开始日期', controller: controllers['start']!, setStateDialog: setStateDialog),
                       const SizedBox(width: 8),
                       _buildDatePickerField(context: context, label: '结束日期', controller: controllers['end']!, setStateDialog: setStateDialog),
-                      IconButton(icon: const Icon(Icons.remove_circle, color: Colors.red), onPressed: () { setStateDialog(() { sessions.removeAt(idx); }); }),
+                      IconButton(icon: const Icon(Icons.remove_circle, color: Colors.red), onPressed: () { setStateDialog(() { final removed = sessions.removeAt(idx); removed['start']?.dispose(); removed['end']?.dispose(); }); }),
                     ]),
                   );
                 }).toList(),
@@ -1116,9 +1415,10 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                       'subtitle': subtitleController.text,
                       'cover': coverController.text,
                       'description': descController.text,
-                      'isFinished': isFinished,
+                      'isFinished': status == '已看完',
+                      'status': status,
                       'category': category,
-                      'volumes': volumes,
+                      'volumes': [for (int i = 0; i < volumes.length; i++) _normalizeVolume(volumes[i], i)],
                       'sessions': sessionData,
                     });
                   });
@@ -1131,22 +1431,35 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
         },
       ),
     );
+    titleController.dispose();
+    subtitleController.dispose();
+    coverController.dispose();
+    descController.dispose();
+    for (final session in sessions) {
+      session['start']?.dispose();
+      session['end']?.dispose();
+    }
+
   }
 
-  void _editAnime(int index) {
+  Future<void> _editAnime(int index) async {
     final titleController = TextEditingController(text: _animeList[index]['title']);
     final subtitleController = TextEditingController(text: _animeList[index]['subtitle']);
     final coverController = TextEditingController(text: _animeList[index]['cover'] ?? '');
     final descController = TextEditingController(text: _animeList[index]['description'] ?? '');
-    bool isFinished = _animeList[index]['isFinished'] ?? false;
+    String status = _watchStatuses.contains(_animeList[index]['status']?.toString())
+        ? _animeList[index]['status'].toString()
+        : ((_animeList[index]['isFinished'] ?? false) ? '已看完' : '想看');
     String category = _animeList[index]['category'] ?? '番剧';
-    List<Map<String, dynamic>> volumes = (_animeList[index]['volumes'] ?? []).map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e)).toList();
+    List<Map<String, dynamic>> volumes = (_animeList[index]['volumes'] is List)
+        ? [for (int i = 0; i < (_animeList[index]['volumes'] as List).length; i++) _normalizeVolume((_animeList[index]['volumes'] as List)[i], i)]
+        : <Map<String, dynamic>>[];
 
     List<dynamic> existingSessions = _animeList[index]['sessions'] ?? [];
     List<Map<String, TextEditingController>> sessions = existingSessions.map((e) => {'start': TextEditingController(text: e['start'] ?? ''), 'end': TextEditingController(text: e['end'] ?? '')}).toList();
     if (sessions.isEmpty) sessions.add({'start': TextEditingController(), 'end': TextEditingController()});
 
-    showDialog(
+    await showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setStateDialog) {
@@ -1156,7 +1469,12 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
               child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
                 const Text('分类：', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                 const SizedBox(height: 6),
-                _buildCategorySelector(category, (val) => setStateDialog(() => category = val)),
+                _buildCategorySelector(category, (val) => setStateDialog(() {
+                    if (category == val) return;
+                    category = val;
+                    subtitleController.text = val == '番剧' ? '0集 00:00:00' : '未开始';
+                    if (val == '番剧') volumes = [];
+                  })),
                 const SizedBox(height: 12),
                 Row(children: [
                   Expanded(child: TextField(controller: titleController, decoration: const InputDecoration(labelText: '名字'))),
@@ -1175,7 +1493,7 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                 if (category == '番剧')
                   InkWell(
                     onTap: () async {
-                      final result = await _showAnimeProgressPicker(context, subtitleController.text);
+                      final result = await _showAnimeProgressPicker(context, subtitleController.text, title: titleController.text);
                       if (result != null) { subtitleController.text = result; setStateDialog(() {}); }
                     },
                     child: InputDecorator(
@@ -1205,7 +1523,6 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                   ),
                 ],
                 const SizedBox(height: 8),
-                Row(children: [const Text('标记为已看完: '), Switch(value: isFinished, onChanged: (val) => setStateDialog(() => isFinished = val))]),
                 const SizedBox(height: 8),
                 if (coverController.text.isNotEmpty)
                   Center(child: ClipRRect(borderRadius: BorderRadius.circular(6), child: coverController.text.startsWith('http') ? Image.network(coverController.text, width: 80, height: 110, fit: BoxFit.cover, headers: {'Referer': 'https://bgm.tv/', 'User-Agent': 'Mozilla/5.0'}, errorBuilder: (c, e, s) => const Icon(Icons.image, size: 40, color: Colors.grey)) : Image.file(File(coverController.text), width: 80, height: 110, fit: BoxFit.cover))),
@@ -1228,7 +1545,7 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                       _buildDatePickerField(context: context, label: '开始日期', controller: controllers['start']!, setStateDialog: setStateDialog),
                       const SizedBox(width: 8),
                       _buildDatePickerField(context: context, label: '结束日期', controller: controllers['end']!, setStateDialog: setStateDialog),
-                      IconButton(icon: const Icon(Icons.remove_circle, color: Colors.red), onPressed: () { setStateDialog(() { sessions.removeAt(idx); }); }),
+                      IconButton(icon: const Icon(Icons.remove_circle, color: Colors.red), onPressed: () { setStateDialog(() { final removed = sessions.removeAt(idx); removed['start']?.dispose(); removed['end']?.dispose(); }); }),
                     ]),
                   );
                 }).toList(),
@@ -1250,9 +1567,10 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                     _animeList[index]['subtitle'] = subtitleController.text;
                     _animeList[index]['cover'] = coverController.text;
                     _animeList[index]['description'] = descController.text;
-                    _animeList[index]['isFinished'] = isFinished;
+                    _animeList[index]['isFinished'] = status == '已看完';
+                    _animeList[index]['status'] = status;
                     _animeList[index]['category'] = category;
-                    _animeList[index]['volumes'] = volumes;
+                    _animeList[index]['volumes'] = [for (int i = 0; i < volumes.length; i++) _normalizeVolume(volumes[i], i)];
                     _animeList[index]['sessions'] = sessionData;
                   });
                   _saveData();
@@ -1264,6 +1582,15 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
         },
       ),
     );
+    titleController.dispose();
+    subtitleController.dispose();
+    coverController.dispose();
+    descController.dispose();
+    for (final session in sessions) {
+      session['start']?.dispose();
+      session['end']?.dispose();
+    }
+
   }
 
   void _deleteAnime(int index) {
@@ -1289,8 +1616,10 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
         String subtitle = anime['subtitle'].toString().toLowerCase();
         if (!title.contains(_searchKeyword.toLowerCase()) && !subtitle.contains(_searchKeyword.toLowerCase())) return false;
       }
-      if (_filterMode == 1) return anime['isFinished'] != true;
-      if (_filterMode == 2) return anime['isFinished'] == true;
+      final status = _watchStatuses.contains(anime['status']?.toString())
+          ? anime['status'].toString()
+          : ((anime['isFinished'] ?? false) ? '已看完' : '想看');
+      if (_filterMode > 0) return status == _filterNames[_filterMode];
       return true;
     }).toList();
 
@@ -1340,13 +1669,22 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                           ),
                         Expanded(child: Text(anime['title'], style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis)),
                       ]),
-                      if (anime['isFinished'] == true) ...[
-                        const SizedBox(height: 8),
-                        Row(children: [Icon(Icons.check_circle, size: 16, color: Colors.green[600]), const SizedBox(width: 4), Text('已看完', style: TextStyle(fontSize: 14, color: Colors.green[600]))]),
-                      ] else ...[
-                        const SizedBox(height: 8),
-                        Text(anime['subtitle'], style: TextStyle(fontSize: 15, color: Colors.grey[600])),
-                      ],
+                      const SizedBox(height: 8),
+                      Builder(builder: (context) {
+                        final status = _watchStatuses.contains(anime['status']?.toString())
+                            ? anime['status'].toString()
+                            : ((anime['isFinished'] ?? false) ? '已看完' : '想看');
+                        final color = _statusColor(status);
+                        return Row(children: [
+                          Icon(_statusIcon(status), size: 17, color: color),
+                          const SizedBox(width: 4),
+                          Text(status, style: TextStyle(fontSize: 14, color: color, fontWeight: FontWeight.w600)),
+                          if (status != '已看完') ...[
+                            const SizedBox(width: 10),
+                            Expanded(child: Text(anime['subtitle'], style: TextStyle(fontSize: 14, color: Colors.grey[600]), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          ],
+                        ]);
+                      }),
                       if (volumes.isNotEmpty) ...[
                         const SizedBox(height: 6),
                         Text('共 ${volumes.length} 卷', style: TextStyle(fontSize: 12, color: Colors.purple[400])),
@@ -1355,10 +1693,29 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                         const SizedBox(height: 8),
                         Text(sessionSummary, style: TextStyle(fontSize: 12, color: Colors.blue[400])),
                       ],
+                    if ((anime['category'] == '小说' || anime['category'] == '漫画') && volumes.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        '分册：${volumes.where((v) => v is Map && v['status'] == '已读').length}/${volumes.length} 已读'
+                        '${volumes.any((v) => v is Map && v['status'] == '阅读中') ? ' · ${volumes.firstWhere((v) => v is Map && v['status'] == '阅读中')['name']} 阅读中' : ''}',
+                        style: TextStyle(fontSize: 12, color: Colors.indigo[400]),
+                      ),
+                    ],
                     ])),
-                    Checkbox(
-                      value: anime['isFinished'] ?? false,
-                      onChanged: (val) { setState(() => _animeList[originalIndex]['isFinished'] = val); _saveData(); },
+                    PopupMenuButton<String>(
+                      tooltip: '修改观看状态',
+                      icon: const Icon(Icons.more_vert, color: Colors.grey),
+                      onSelected: (value) {
+                        setState(() {
+                          _animeList[originalIndex]['status'] = value;
+                          _animeList[originalIndex]['isFinished'] = value == '已看完';
+                        });
+                        _saveData();
+                      },
+                      itemBuilder: (context) => _watchStatuses.map((s) => PopupMenuItem<String>(
+                        value: s,
+                        child: Row(children: [Icon(_statusIcon(s), size: 20, color: _statusColor(s)), const SizedBox(width: 8), Text(s)]),
+                      )).toList(),
                     ),
                   ]),
                 ),
@@ -1379,7 +1736,12 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                       selected: selected,
                       onSelected: (_) => setState(() => _categoryFilter = cat),
                       selectedColor: const Color(0xFF366CB6),
-                      labelStyle: TextStyle(color: selected ? Colors.white : Colors.black87, fontWeight: selected ? FontWeight.bold : FontWeight.normal),
+                      labelStyle: TextStyle(
+                        color: selected
+                            ? Colors.white
+                            : Theme.of(context).colorScheme.onSurface,
+                        fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+                      ),
                     ),
                   );
                 }).toList()),
@@ -1461,18 +1823,29 @@ class ProfilePageState extends State<ProfilePage> {
   @override
   void initState() {
     super.initState();
+    themeController.addListener(_onThemeChanged);
     loadHeatmapData();
     loadProfileData();
   }
 
+  void _onThemeChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    themeController.removeListener(_onThemeChanged);
     _heatmapScrollController.dispose();
     super.dispose();
   }
 
+  Future<void> _toggleDarkMode(bool value) async {
+    await themeController.setDarkMode(value);
+  }
+
   Future<void> loadProfileData() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
       _profileName = prefs.getString('profile_name') ?? '昵称';
       _profileSignature = prefs.getString('profile_signature') ?? '签名';
@@ -1490,7 +1863,7 @@ class ProfilePageState extends State<ProfilePage> {
   Future<void> _pickAvatar() async {
     final ImagePicker picker = ImagePicker();
     final XFile? image = await picker.pickImage(source: ImageSource.gallery);
-    if (image != null) {
+    if (image != null && mounted) {
       setState(() => _avatarPath = image.path);
       _saveProfile();
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('头像已更新'), duration: Duration(milliseconds: 800)));
@@ -1522,23 +1895,36 @@ class ProfilePageState extends State<ProfilePage> {
   }
 
   Future<void> loadHeatmapData() async {
+    if (!mounted) return;
     setState(() => _isLoading = true);
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? jsonString = prefs.getString('dailyLogs');
-    Map<String, int> minutesMap = {};
-    List<Map<String, dynamic>> rawLogs = [];
-    if (jsonString != null) {
-      List<dynamic> decoded = jsonDecode(jsonString);
-      for (var log in decoded) {
-        Map<String, dynamic> map = Map<String, dynamic>.from(log);
-        rawLogs.add(map);
-        String date = map['date'];
-        int duration = map['duration'] ?? 0;
-        minutesMap[date] = (minutesMap[date] ?? 0) + duration;
+    final prefs = await SharedPreferences.getInstance();
+    final jsonString = prefs.getString('dailyLogs');
+    final Map<String, int> minutesMap = {};
+    final List<Map<String, dynamic>> rawLogs = [];
+    if (jsonString != null && jsonString.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(jsonString);
+        if (decoded is List) {
+          for (final log in decoded) {
+            if (log is! Map) continue;
+            final map = Map<String, dynamic>.from(log);
+            final date = map['date']?.toString() ?? '';
+            if (date.isEmpty) continue;
+            final duration = int.tryParse((map['duration'] ?? 0).toString()) ?? 0;
+            map['date'] = date;
+            map['duration'] = duration;
+            rawLogs.add(map);
+            minutesMap[date] = (minutesMap[date] ?? 0) + duration;
+          }
+        }
+      } catch (e) {
+        debugPrint('读取 dailyLogs 失败: $e');
       }
     }
+    if (!mounted) return;
     setState(() { _dailyLogs = rawLogs; _dailyMinutes = minutesMap; _isLoading = false; });
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       if (_heatmapScrollController.hasClients) _heatmapScrollController.jumpTo(_heatmapScrollController.position.maxScrollExtent);
     });
   }
@@ -1603,6 +1989,18 @@ class ProfilePageState extends State<ProfilePage> {
             const SizedBox(height: 12),
             const Text('github.com/NGng127\n新番列表:https://acgntaiwan.github.io/Anime-List', style: TextStyle(color: Colors.grey, fontSize: 13), textAlign: TextAlign.center),
           ])),
+          const SizedBox(height: 24),
+          Card(
+            child: SwitchListTile(
+              secondary: Icon(
+                themeController.isDarkMode ? Icons.dark_mode : Icons.light_mode,
+              ),
+              title: const Text('深色模式'),
+              subtitle: Text(themeController.isDarkMode ? '已开启' : '跟随浅色主题'),
+              value: themeController.isDarkMode,
+              onChanged: _toggleDarkMode,
+            ),
+          ),
           const SizedBox(height: 30),
           const Text('观看记录', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 16),
@@ -1633,7 +2031,7 @@ class ProfilePageState extends State<ProfilePage> {
     final now = DateTime.now();
     DateTime earliest = now.subtract(const Duration(days: 364));
     if (_dailyMinutes.isNotEmpty) {
-      final dates = _dailyMinutes.keys.map((e) => DateTime.parse(e)).toList();
+      final dates = _dailyMinutes.keys.map((e) => DateTime.tryParse(e)).whereType<DateTime>().toList();
       dates.sort();
       if (dates.first.isBefore(earliest)) earliest = dates.first;
     }
@@ -1722,7 +2120,7 @@ class HistoryPage extends StatefulWidget {
 
 class _HistoryPageState extends State<HistoryPage> {
   List<Map<String, dynamic>> _dailyLogs = [];
-  late SharedPreferences _prefs;
+  SharedPreferences? _prefs;
   DateTime _selectedDate = DateTime.now();
   DateTime? _filterDate;
   final TextEditingController _titleController = TextEditingController();
@@ -1734,19 +2132,45 @@ class _HistoryPageState extends State<HistoryPage> {
     _loadLogs();
   }
 
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _durationController.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadLogs() async {
-    _prefs = await SharedPreferences.getInstance();
-    String? jsonString = _prefs.getString('dailyLogs');
-    if (jsonString != null) {
-      setState(() {
-        _dailyLogs = List<Map<String, dynamic>>.from(jsonDecode(jsonString));
-        _dailyLogs.sort((a, b) => b['date'].compareTo(a['date']));
-      });
+    final prefs = await SharedPreferences.getInstance();
+    final jsonString = prefs.getString('dailyLogs');
+    final loaded = <Map<String, dynamic>>[];
+    if (jsonString != null && jsonString.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(jsonString);
+        if (decoded is List) {
+          for (final e in decoded) {
+            if (e is Map) {
+              final map = Map<String, dynamic>.from(e);
+              map['date'] = map['date']?.toString() ?? '';
+              map['title'] = map['title']?.toString() ?? '';
+              map['duration'] = int.tryParse((map['duration'] ?? 0).toString()) ?? 0;
+              loaded.add(map);
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('读取 dailyLogs 失败: $e');
+      }
     }
+    loaded.sort((a, b) => (b['date'] ?? '').toString().compareTo((a['date'] ?? '').toString()));
+    if (!mounted) return;
+    _prefs = prefs;
+    setState(() => _dailyLogs = loaded);
   }
 
   Future<void> _saveLogs() async {
-    await _prefs.setString('dailyLogs', jsonEncode(_dailyLogs));
+    final prefs = _prefs ?? await SharedPreferences.getInstance();
+    _prefs = prefs;
+    await prefs.setString('dailyLogs', jsonEncode(_dailyLogs));
   }
 
   List<String> get _allTitles => _dailyLogs.map((l) => l['title'].toString()).toSet().toList();
@@ -1784,35 +2208,40 @@ class _HistoryPageState extends State<HistoryPage> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('记录已添加')));
   }
 
-  void _editLog(int index) {
+  Future<void> _editLog(int index) async {
     final log = _dailyLogs[index];
-    final titleCtrl = TextEditingController(text: log['title']);
-    final durationCtrl = TextEditingController(text: log['duration'].toString());
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('修改记录'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(controller: titleCtrl, decoration: const InputDecoration(labelText: '番剧名')),
-          const SizedBox(height: 12),
-          TextField(controller: durationCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '时长(分)')),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-          TextButton(onPressed: () {
-            final newDuration = int.tryParse(durationCtrl.text);
-            if (titleCtrl.text.isNotEmpty && newDuration != null) {
-              setState(() {
-                _dailyLogs[index]['title'] = titleCtrl.text.trim();
-                _dailyLogs[index]['duration'] = newDuration;
-              });
-              _saveLogs();
-            }
-            Navigator.pop(context);
-          }, child: const Text('保存')),
-        ],
-      ),
-    );
+    final titleCtrl = TextEditingController(text: log['title']?.toString() ?? '');
+    final durationCtrl = TextEditingController(text: (log['duration'] ?? 0).toString());
+    try {
+      await showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('修改记录'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(controller: titleCtrl, decoration: const InputDecoration(labelText: '番剧名')),
+            const SizedBox(height: 12),
+            TextField(controller: durationCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '时长(分)')),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+            TextButton(onPressed: () {
+              final newDuration = int.tryParse(durationCtrl.text);
+              if (titleCtrl.text.trim().isNotEmpty && newDuration != null) {
+                setState(() {
+                  _dailyLogs[index]['title'] = titleCtrl.text.trim();
+                  _dailyLogs[index]['duration'] = newDuration;
+                });
+                _saveLogs();
+              }
+              Navigator.pop(context);
+            }, child: const Text('保存')),
+          ],
+        ),
+      );
+    } finally {
+      titleCtrl.dispose();
+      durationCtrl.dispose();
+    }
   }
 
   void _deleteLog(int index) {
@@ -1915,6 +2344,545 @@ class _HistoryPageState extends State<HistoryPage> {
                 ),
         ),
       ]),
+    );
+  }
+}
+
+class VolumeManagerPage extends StatefulWidget {
+  final List<Map<String, dynamic>> volumes;
+
+  const VolumeManagerPage({super.key, required this.volumes});
+
+  @override
+  State<VolumeManagerPage> createState() => _VolumeManagerPageState();
+}
+
+class _VolumeManagerPageState extends State<VolumeManagerPage> {
+  static const List<String> _statuses = ['未开始', '阅读中', '已读', '弃读'];
+  late List<Map<String, dynamic>> _volumes;
+
+  @override
+  void initState() {
+    super.initState();
+    _volumes = [
+      for (int i = 0; i < widget.volumes.length; i++)
+        _normalize(widget.volumes[i], i),
+    ];
+  }
+
+  Map<String, dynamic> _normalize(dynamic raw, int index) {
+    final v = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    final rawStatus = v['status']?.toString();
+    final status = _statuses.contains(rawStatus)
+        ? rawStatus!
+        : ((v['progress']?.toString().trim().isNotEmpty ?? false)
+            ? '阅读中'
+            : '未开始');
+    return {
+      'name': (v['name']?.toString().trim().isNotEmpty ?? false)
+          ? v['name'].toString().trim()
+          : '第${index + 1}卷',
+      // 已读时不再保留进度显示。
+      'progress': status == '已读' ? '' : (v['progress']?.toString() ?? ''),
+      'status': status,
+      'cover': v['cover']?.toString() ?? '',
+      'note': v['note']?.toString() ?? '',
+    };
+  }
+
+  IconData _statusIcon(String status) {
+    switch (status) {
+      case '阅读中':
+        return Icons.menu_book;
+      case '已读':
+        return Icons.check_circle;
+      case '弃读':
+        return Icons.remove_circle;
+      default:
+        return Icons.radio_button_unchecked;
+    }
+  }
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case '阅读中':
+        return Colors.blue;
+      case '已读':
+        return Colors.green;
+      case '弃读':
+        return Colors.grey;
+      default:
+        return Colors.grey.shade500;
+    }
+  }
+
+  Future<void> _addVolume() async {
+    final result = await Navigator.of(context).push<Map<String, dynamic>>(
+      PageRouteBuilder<Map<String, dynamic>>(
+        pageBuilder: (_, __, ___) => VolumeEditPage(
+          volume: _normalize({
+            'name': '第${_volumes.length + 1}卷',
+            'progress': '',
+            'status': '未开始',
+            'cover': '',
+            'note': '',
+          }, _volumes.length),
+          index: _volumes.length,
+        ),
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        transitionsBuilder: (_, __, ___, child) => child,
+      ),
+    );
+    if (result != null && mounted) {
+      setState(() => _volumes.add(_normalize(result, _volumes.length)));
+    }
+  }
+
+  Future<void> _editVolume(int index) async {
+    final result = await Navigator.of(context).push<Map<String, dynamic>>(
+      PageRouteBuilder<Map<String, dynamic>>(
+        pageBuilder: (_, __, ___) => VolumeEditPage(
+          volume: _volumes[index],
+          index: index,
+        ),
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        transitionsBuilder: (_, __, ___, child) => child,
+      ),
+    );
+    if (result != null && mounted) {
+      setState(() => _volumes[index] = _normalize(result, index));
+    }
+  }
+
+  Future<void> _deleteVolume(int index) async {
+    final name = _volumes[index]['name']?.toString() ?? '该分册';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('删除分册'),
+        content: Text('确定要删除“$name”吗？\n删除后需要返回记录页面并保存，才会永久保存这个修改。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) {
+      setState(() => _volumes.removeAt(index));
+    }
+  }
+
+  Widget _buildCover(String cover) {
+    if (cover.isEmpty) {
+      return const Icon(Icons.menu_book, size: 30, color: Colors.grey);
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: cover.startsWith('http')
+          ? Image.network(
+              cover,
+              width: 42,
+              height: 56,
+              fit: BoxFit.cover,
+              headers: const {
+                'Referer': 'https://bgm.tv/',
+                'User-Agent': 'Mozilla/5.0',
+              },
+              errorBuilder: (c, e, s) => const Icon(
+                Icons.menu_book,
+                size: 30,
+                color: Colors.grey,
+              ),
+            )
+          : Image.file(
+              File(cover),
+              width: 42,
+              height: 56,
+              fit: BoxFit.cover,
+              errorBuilder: (c, e, s) => const Icon(
+                Icons.menu_book,
+                size: 30,
+                color: Colors.grey,
+              ),
+            ),
+    );
+  }
+
+  void _finish() {
+    Navigator.pop(
+      context,
+      [
+        for (int i = 0; i < _volumes.length; i++) _normalize(_volumes[i], i),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 允许系统右滑返回；页面转场使用上面的 FadeForwards，避免预测返回时缩小页面。
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('分册管理'),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          tooltip: '取消并返回',
+          onPressed: () => Navigator.pop(context),
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: _finish,
+            icon: const Icon(Icons.check),
+            label: const Text('完成'),
+          ),
+        ],
+      ),
+      body: _volumes.isEmpty
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.menu_book_outlined, size: 64, color: Colors.grey.shade400),
+                  const SizedBox(height: 12),
+                  const Text('还没有分册', style: TextStyle(fontSize: 16)),
+                  const SizedBox(height: 8),
+                  const Text('点击下方按钮添加第一卷', style: TextStyle(color: Colors.grey)),
+                ],
+              ),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+              itemCount: _volumes.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              itemBuilder: (context, index) {
+                final v = _volumes[index];
+                final name = v['name']?.toString() ?? '第${index + 1}卷';
+                final status = v['status']?.toString() ?? '未开始';
+                final progress = v['progress']?.toString() ?? '';
+                final note = v['note']?.toString() ?? '';
+                return Card(
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    leading: SizedBox(width: 48, height: 60, child: _buildCover(v['cover']?.toString() ?? '')),
+                    title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Padding(
+                      padding: const EdgeInsets.only(top: 5),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(_statusIcon(status), size: 16, color: _statusColor(status)),
+                              const SizedBox(width: 4),
+                              Text(status, style: TextStyle(color: _statusColor(status))),
+                              if (status != '已读' && progress.isNotEmpty) ...[
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    progress,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                          if (note.isNotEmpty) ...[
+                            const SizedBox(height: 3),
+                            Text(
+                              note,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    trailing: PopupMenuButton<String>(
+                      onSelected: (value) {
+                        if (value == 'edit') _editVolume(index);
+                        if (value == 'delete') _deleteVolume(index);
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'edit', child: Text('编辑')),
+                        PopupMenuItem(value: 'delete', child: Text('删除')),
+                      ],
+                    ),
+                    onTap: () => _editVolume(index),
+                  ),
+                );
+              },
+            ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _addVolume,
+        icon: const Icon(Icons.add),
+        label: const Text('添加分册'),
+      ),
+      );
+  }
+}
+
+class VolumeEditPage extends StatefulWidget {
+  final Map<String, dynamic> volume;
+  final int index;
+
+  const VolumeEditPage({
+    super.key,
+    required this.volume,
+    required this.index,
+  });
+
+  @override
+  State<VolumeEditPage> createState() => _VolumeEditPageState();
+}
+
+class _VolumeEditPageState extends State<VolumeEditPage> {
+  static const List<String> _statuses = ['未开始', '阅读中', '已读', '弃读'];
+  late final TextEditingController _nameController;
+  late final TextEditingController _progressController;
+  late final TextEditingController _noteController;
+  late String _status;
+  late String _cover;
+  late bool _finished;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(
+      text: widget.volume['name']?.toString() ?? '第${widget.index + 1}卷',
+    );
+    _progressController = TextEditingController(
+      text: widget.volume['progress']?.toString() ?? '',
+    );
+    _noteController = TextEditingController(
+      text: widget.volume['note']?.toString() ?? '',
+    );
+    _status = _statuses.contains(widget.volume['status']?.toString())
+        ? widget.volume['status'].toString()
+        : '未开始';
+    _cover = widget.volume['cover']?.toString() ?? '';
+    _finished = _status == '已读';
+    if (_finished) _progressController.clear();
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _progressController.dispose();
+    _noteController.dispose();
+    super.dispose();
+  }
+
+  IconData _statusIcon(String status) {
+    switch (status) {
+      case '阅读中':
+        return Icons.menu_book;
+      case '已读':
+        return Icons.check_circle;
+      case '弃读':
+        return Icons.remove_circle;
+      default:
+        return Icons.radio_button_unchecked;
+    }
+  }
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case '阅读中':
+        return Colors.blue;
+      case '已读':
+        return Colors.green;
+      case '弃读':
+        return Colors.grey;
+      default:
+        return Colors.grey.shade500;
+    }
+  }
+
+  Future<void> _pickCover() async {
+    final image = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (image != null && mounted) {
+      setState(() => _cover = image.path);
+    }
+  }
+
+  void _save() {
+    final result = <String, dynamic>{
+      'name': _nameController.text.trim().isEmpty
+          ? '第${widget.index + 1}卷'
+          : _nameController.text.trim(),
+      'progress': _finished ? '' : _progressController.text.trim(),
+      'status': _finished ? '已读' : _status,
+      'cover': _cover,
+      'note': _noteController.text.trim(),
+    };
+    Navigator.pop(context, result);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 允许右滑返回；使用全局 FadeForwards 转场，不显示 predictive-back 缩放。
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_nameController.text.trim().isEmpty
+            ? '编辑分册'
+            : _nameController.text.trim()),
+        actions: [
+          TextButton.icon(
+            onPressed: _save,
+            icon: const Icon(Icons.save),
+            label: const Text('保存'),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        children: [
+          TextField(
+            controller: _nameController,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: '卷名',
+              hintText: '如 第一卷 / SS1 / 99.9 / 外传',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Card(
+            child: CheckboxListTile(
+              value: _finished,
+              onChanged: (value) {
+                final checked = value ?? false;
+                setState(() {
+                  _finished = checked;
+                  if (checked) {
+                    _status = '已读';
+                    _progressController.clear();
+                  } else if (_status == '已读') {
+                    _status = '阅读中';
+                  }
+                });
+              },
+              title: const Text('读完'),
+              subtitle: const Text('勾选后隐藏阅读进度，并将状态设为“已读”'),
+              secondary: Icon(
+                Icons.check_circle,
+                color: _finished ? Colors.green : Colors.grey,
+              ),
+              controlAffinity: ListTileControlAffinity.trailing,
+            ),
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<String>(
+            value: _statuses.contains(_status) ? _status : '未开始',
+            decoration: const InputDecoration(
+              labelText: '分册状态',
+              border: OutlineInputBorder(),
+            ),
+            items: _statuses
+                .map(
+                  (s) => DropdownMenuItem(
+                    value: s,
+                    child: Row(
+                      children: [
+                        Icon(_statusIcon(s), size: 20, color: _statusColor(s)),
+                        const SizedBox(width: 8),
+                        Text(s),
+                      ],
+                    ),
+                  ),
+                )
+                .toList(),
+            onChanged: _finished
+                ? null
+                : (value) {
+                    if (value != null) setState(() => _status = value);
+                  },
+          ),
+          if (!_finished) ...[
+            const SizedBox(height: 16),
+            TextField(
+              controller: _progressController,
+              decoration: const InputDecoration(
+                labelText: '阅读进度',
+                hintText: '如 第8话 / 127页 / 80%',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
+          TextField(
+            controller: _noteController,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: '备注（可选）',
+              hintText: '记录这一卷的内容、收藏情况等',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 20),
+          if (_cover.isNotEmpty)
+            Center(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: _cover.startsWith('http')
+                    ? Image.network(
+                        _cover,
+                        width: 120,
+                        height: 165,
+                        fit: BoxFit.cover,
+                        headers: const {
+                          'Referer': 'https://bgm.tv/',
+                          'User-Agent': 'Mozilla/5.0',
+                        },
+                        errorBuilder: (c, e, s) => const Icon(
+                          Icons.menu_book,
+                          size: 50,
+                          color: Colors.grey,
+                        ),
+                      )
+                    : Image.file(
+                        File(_cover),
+                        width: 120,
+                        height: 165,
+                        fit: BoxFit.cover,
+                        errorBuilder: (c, e, s) => const Icon(
+                          Icons.menu_book,
+                          size: 50,
+                          color: Colors.grey,
+                        ),
+                      ),
+              ),
+            ),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              OutlinedButton.icon(
+                onPressed: _pickCover,
+                icon: const Icon(Icons.photo_library),
+                label: const Text('选择封面'),
+              ),
+              if (_cover.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: () => setState(() => _cover = ''),
+                  icon: const Icon(Icons.clear, color: Colors.red),
+                  tooltip: '移除封面',
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
