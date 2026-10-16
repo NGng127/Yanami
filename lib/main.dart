@@ -1329,12 +1329,6 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
                   onChanged: (val) { if (val != null) setStateDialog(() => status = val); },
                 ),
                 const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  value: status,
-                  decoration: const InputDecoration(labelText: '观看状态', border: OutlineInputBorder()),
-                  items: _watchStatuses.map((s) => DropdownMenuItem(value: s, child: Row(children: [Icon(_statusIcon(s), size: 20, color: _statusColor(s)), const SizedBox(width: 8), Text(s)]))).toList(),
-                  onChanged: (val) { if (val != null) setStateDialog(() => status = val); },
-                ),
                 const SizedBox(height: 12),
                 if (category == '番剧')
                   InkWell(
@@ -1793,7 +1787,21 @@ class AnimeRecordPageState extends State<AnimeRecordPage> {
       floatingActionButton: Column(mainAxisSize: MainAxisSize.min, children: [
         FloatingActionButton.small(
           heroTag: 'historyBtn', backgroundColor: Colors.blueGrey, foregroundColor: Colors.white,
-          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const HistoryPage())).then((_) {}),
+          onPressed: () => Navigator.push(
+            context,
+            PageRouteBuilder<void>(
+              pageBuilder: (context, animation, secondaryAnimation) => const HistoryPage(),
+              transitionDuration: const Duration(milliseconds: 220),
+              reverseTransitionDuration: const Duration(milliseconds: 200),
+              transitionsBuilder: (context, animation, secondaryAnimation, child) {
+                final slide = Tween<Offset>(
+                  begin: const Offset(1, 0),
+                  end: Offset.zero,
+                ).chain(CurveTween(curve: Curves.easeOutCubic));
+                return SlideTransition(position: animation.drive(slide), child: child);
+              },
+            ),
+          ),
           child: const Icon(Icons.history),
         ),
         const SizedBox(height: 12),
@@ -1931,22 +1939,61 @@ class ProfilePageState extends State<ProfilePage> {
 
   void _showDateDetails(String dateStr) {
     final dayLogs = _dailyLogs.where((log) => log['date'] == dateStr).toList();
+    final totalMinutes = dayLogs.fold<int>(
+      0,
+      (total, log) => total + (int.tryParse((log['duration'] ?? 0).toString()) ?? 0),
+    );
+    final totalHours = totalMinutes ~/ 60;
+    final remainingMinutes = totalMinutes % 60;
+    final totalText = totalHours > 0
+        ? '$totalHours 小时 $remainingMinutes 分钟'
+        : '$totalMinutes 分钟';
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         title: Text('日期：$dateStr'),
         content: SizedBox(
           width: double.maxFinite,
-          child: dayLogs.isEmpty
-              ? const Text('这一天没有观看记录')
-              : ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: dayLogs.length,
-                  itemBuilder: (context, index) {
-                    final log = dayLogs[index];
-                    return ListTile(title: Text(log['title']), trailing: Text('${log['duration']} 分钟', style: const TextStyle(fontWeight: FontWeight.bold)));
-                  },
+          height: dayLogs.isEmpty ? 105 : 360,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(10),
                 ),
+                child: Text(
+                  '当日总时长：$totalText',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Theme.of(context).colorScheme.onPrimaryContainer,
+                  ),
+                ),
+              ),
+              if (dayLogs.isEmpty)
+                const Expanded(child: Center(child: Text('这一天没有观看记录')))
+              else
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: dayLogs.length,
+                    itemBuilder: (context, index) {
+                      final log = dayLogs[index];
+                      return ListTile(
+                        title: Text(log['title']?.toString() ?? '未命名记录'),
+                        trailing: Text(
+                          '${log['duration']} 分钟',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ],
+          ),
         ),
         actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('关闭'))],
       ),
